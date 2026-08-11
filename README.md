@@ -96,3 +96,7 @@ export ARK_MODEL="doubao-seed-2-0-mini-260428"
 ## License
 
 MIT
+
+## 凭据
+
+push/pull 通过 git credential helper 自动从 1Password 取 GitHub token，无需手动配置。
