@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-vision_doubao.py — 帮 Claude 看图（多供应商：默认 DeepSeek V4 Flash Vision，自动回退豆包）
+vision_doubao.py — 帮 Claude 看图（DeepSeek V4 Flash Vision）
 
 用法：
   python3 vision_doubao.py <图> A "额外指令"         # UI 页面还原
@@ -11,45 +11,16 @@ vision_doubao.py — 帮 Claude 看图（多供应商：默认 DeepSeek V4 Flash
   python3 vision_doubao.py <图> E "额外指令"         # 通用描述
   python3 vision_doubao.py compare <图1> <图2> "指令"  # 双图对比
 
-多供应商路由（按 --model 选择）：
-  默认  deepseek-v4-flash-vision-exp  —— DeepSeek V4 Flash Vision（快/便宜）
-  豆包  doubao-seed-2-1-pro-260628    —— 质量优先（深度思考）
-  豆包  doubao-seed-2-0-mini-260428   —— 批量/跑量（低时延）
-  DeepSeek 鉴权失败（401/403）时自动回退 doubao-2-1-pro，链路不中断。
-
-Key 获取优先级（按模型各自取）：
-  环境变量 DEEPSEEK_API_KEY / ARK_API_KEY > 1Password op CLI > 报错。不硬编码密钥。
-模型优先级：--model 参数 > VISION_MODEL / ARK_MODEL 环境变量 > 默认 deepseek。
+模型：deepseek-v4-flash-vision-exp（实验版，图片转 token 计费，一张图最多 384 tokens）
+Key 获取优先级：DEEPSEEK_API_KEY 环境变量 > 内置默认 key > 1Password op CLI > 报错。
+不硬编码密钥到仓库（GitHub 版本内置 key 留空，仅环境变量 / 1Password）。
 """
 import sys, os, io, base64, json, urllib.request, urllib.error
 
-# ---- 模型注册表：desc / endpoint / key_ref(1Password) / key_env(环境变量) ----
-MODELS = {
-    "deepseek-v4-flash-vision-exp": {
-        "desc": "DeepSeek V4 Flash Vision（默认，快/便宜）",
-        "endpoint": "https://api.deepseek.com/chat/completions",
-        "key_ref": "op://Claude Code/putw5bqgdxoqapulcit5qmszge/credential",
-        "key_env": "DEEPSEEK_API_KEY",
-        "key_label": "DeepSeek",
-    },
-    "doubao-seed-2-1-pro-260628": {
-        "desc": "豆包 2.1 Pro（质量优先，深度思考）",
-        "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-        "key_ref": "op://Claude Code/5jihua4nve4oila2zzumwwmfgi/credential",
-        "key_env": "ARK_API_KEY",
-        "key_label": "豆包",
-    },
-    "doubao-seed-2-0-mini-260428": {
-        "desc": "豆包 2.0 Mini（批量快档）",
-        "endpoint": "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
-        "key_ref": "op://Claude Code/5jihua4nve4oila2zzumwwmfgi/credential",
-        "key_env": "ARK_API_KEY",
-        "key_label": "豆包",
-    },
-}
-DEFAULT_MODEL = "deepseek-v4-flash-vision-exp"
-FALLBACK_MODEL = "doubao-seed-2-1-pro-260628"  # DeepSeek 鉴权失败时回退
-MODEL = os.environ.get("VISION_MODEL") or os.environ.get("ARK_MODEL") or DEFAULT_MODEL
+MODEL = "deepseek-v4-flash-vision-exp"
+ENDPOINT = "https://api.deepseek.com/chat/completions"
+# 内置默认 key（本地版用；GitHub 版留空）。优先级低于环境变量 DEEPSEEK_API_KEY。
+DEFAULT_API_KEY = ""
 MAX_EDGE = 2048
 TIMEOUT = 150
 
@@ -115,10 +86,9 @@ def encode_image(path):
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return b64, desc, mime
 
-def call_api(model, api_key, messages, allow_fallback=True):
-    info = MODELS[model]
-    payload = json.dumps({"model": model, "messages": messages, "max_tokens": 4096}).encode("utf-8")
-    req = urllib.request.Request(info["endpoint"], data=payload, headers={
+def call_api(api_key, messages):
+    payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": 4096}).encode("utf-8")
+    req = urllib.request.Request(ENDPOINT, data=payload, headers={
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     })
@@ -128,11 +98,6 @@ def call_api(model, api_key, messages, allow_fallback=True):
         return data["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")
-        # DeepSeek 鉴权失败 → 自动回退豆包，保证链路不中断
-        if allow_fallback and model == DEFAULT_MODEL and FALLBACK_MODEL and e.code in (401, 403):
-            print(f"⚠️ DeepSeek key 鉴权失败（HTTP {e.code}），自动回退到 {FALLBACK_MODEL}…", file=sys.stderr)
-            fb_key = resolve_api_key(FALLBACK_MODEL)
-            return call_api(FALLBACK_MODEL, fb_key, messages, allow_fallback=False)
         try:
             err = json.loads(body)
             msg = err.get("error", {}).get("message", body)
@@ -142,46 +107,32 @@ def call_api(model, api_key, messages, allow_fallback=True):
     except Exception as e:
         return f"[请求失败] {e}"
 
-def parse_model(argv):
-    """--model <id> 从 argv 里提取并移除。优先级: --model > env > default。"""
-    global MODEL
-    if "--model" in argv:
-        i = argv.index("--model")
-        if i + 1 < len(argv):
-            m = argv[i + 1]
-            if m in MODELS:
-                MODEL = m
-                del argv[i:i + 2]
-            else:
-                sys.exit(f"未知模型: {m}。可用: {', '.join(MODELS)}")
-    return argv
-
 def content_block(b64, mime="image/jpeg"):
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}
 
-def resolve_api_key(model):
-    """按模型取 key：环境变量 > 1Password op CLI > 报错。"""
-    info = MODELS[model]
-    key = os.environ.get(info["key_env"], "").strip()
+def resolve_api_key():
+    """取 key：环境变量 DEEPSEEK_API_KEY > 内置默认 > 1Password op CLI > 报错。"""
+    key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
     if key:
         return key
+    if DEFAULT_API_KEY:
+        return DEFAULT_API_KEY
     import subprocess
     try:
         env = {k: v for k, v in os.environ.items()
                if k not in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
                             "ALL_PROXY", "all_proxy", "NO_PROXY", "no_proxy")}
-        r = subprocess.run(["op", "read", info["key_ref"]],
+        r = subprocess.run(["op", "read", "op://Claude Code/putw5bqgdxoqapulcit5qmszge/credential"],
                            capture_output=True, text=True, timeout=15, env=env)
         if r.returncode == 0 and r.stdout.strip():
             return r.stdout.strip()
     except Exception:
         pass
-    sys.exit(f"缺少 {info['key_env']}：无法从环境变量或 1Password 取到 {info['key_label']} key。\n"
-             f"设置环境变量 {info['key_env']}，或配置 op CLI（条目引用：{info['key_ref']}）。")
+    sys.exit("缺少 DEEPSEEK_API_KEY：无法从环境变量、内置默认或 1Password 取到 DeepSeek key。\n"
+             "设置环境变量 DEEPSEEK_API_KEY，或更新 1Password 条目 putw5bqgdxoqapulcit5qmszge。")
 
 def main(argv):
-    argv = parse_model(list(argv))
-    api_key = resolve_api_key(MODEL)
+    api_key = resolve_api_key()
 
     if len(argv) >= 3 and argv[0] == "compare":
         b1, d1, m1 = encode_image(argv[1])
@@ -193,7 +144,7 @@ def main(argv):
         msg = {"role": "user", "content": [
             content_block(b1, m1), content_block(b2, m2), {"type": "text", "text": prompt}]}
         print(f"# 图1: {d1}\n# 图2: {d2}")
-        print(call_api(MODEL, api_key, [msg]))
+        print(call_api(api_key, [msg]))
         return
 
     img = argv[0]
@@ -201,9 +152,9 @@ def main(argv):
     extra = " ".join(argv[2:])
     prompt = PROMPTS.get(mode, PROMPTS["E"]) + (f"\n额外指令：{extra}" if extra else "")
     b64, desc, mime = encode_image(img)
-    print(f"# {desc}  |  模型 {MODEL} ({MODELS.get(MODEL, {}).get('desc', MODEL)})")
+    print(f"# {desc}  |  模型 {MODEL}")
     msg = {"role": "user", "content": [content_block(b64, mime), {"type": "text", "text": prompt}]}
-    print(call_api(MODEL, api_key, [msg]))
+    print(call_api(api_key, [msg]))
 
 if __name__ == "__main__":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
