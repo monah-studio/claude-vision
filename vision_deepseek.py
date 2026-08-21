@@ -33,6 +33,11 @@ TIMEOUT = int(os.environ.get("VISION_TIMEOUT", "150"))
 RETRIES = 3
 STREAM = os.environ.get("VISION_STREAM", "1") != "0"
 
+# 按模式限制最大输出 token（加速：短模式不用生成 4096 字）
+MODE_MAX_TOKENS = {"S": 400, "D": 1200, "C": 1200, "B": 2000, "A": 3000, "E": 4096}
+# 按模式限制图片长边（S 模式用更小图 → 更少图片 token → 首字更快）
+MODE_MAX_EDGE = {"S": 768}
+
 # 会话记录目录（恢复粘贴图片用）：多个会话各自的 JSONL 都在这里
 PROJECTS_GLOB = "/sessions/*/mnt/.claude/projects/**/*.jsonl"
 RECOVER_DIR = "/tmp/recovered"
@@ -82,7 +87,8 @@ PROMPTS = {
 }
 
 
-def encode_image(path):
+def encode_image(path, max_edge=None):
+    max_edge = max_edge or MAX_EDGE
     try:
         from PIL import Image, ImageOps
     except ImportError:
@@ -95,7 +101,7 @@ def encode_image(path):
         fmt = im.format or ""
     desc = f"{path} ({fmt} {w}x{h})"
     # 快速路径：已是小图（≤1280 且 ≤512KB），直接传原字节，跳过解码/缩放/重编码
-    if fmt in MIME and max(w, h) <= MAX_EDGE and len(raw) <= MAX_RAW_BYTES:
+    if fmt in MIME and max(w, h) <= max_edge and len(raw) <= MAX_RAW_BYTES:
         return base64.b64encode(raw).decode("ascii"), desc, MIME[fmt]
     # 慢路径：EXIF 纠方向 → 大图缩放（BILINEAR 快约 4 倍）→ 透明图垫白底 → WebP method 0 压缩
     with Image.open(path) as im:
@@ -104,8 +110,8 @@ def encode_image(path):
         except Exception:
             pass
         im.load()
-        if max(im.size) > MAX_EDGE:
-            scale = MAX_EDGE / max(im.size)
+        if max(im.size) > max_edge:
+            scale = max_edge / max(im.size)
             new = (int(im.size[0] * scale), int(im.size[1] * scale))
             im = im.resize(new, Image.BILINEAR)
             desc += f" → 已缩放到 {new[0]}x{new[1]}"
@@ -141,10 +147,10 @@ def _extract_err(body):
         return body
 
 
-def call_api(api_key, messages, stream=True):
+def call_api(api_key, messages, stream=True, max_tokens=4096):
     """调用 DeepSeek；stream=True 时边生成边打印，返回完整文本。
     出错抛 ApiError（retryable=True 表示可重试）。"""
-    payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": 4096,
+    payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": max_tokens,
                           "thinking": {"type": "disabled"}, "stream": stream}).encode("utf-8")
     req = urllib.request.Request(ENDPOINT, data=payload, headers={
         "Authorization": f"Bearer {api_key}",
@@ -192,11 +198,11 @@ def call_api(api_key, messages, stream=True):
     return "".join(buf)
 
 
-def call_with_retry(api_key, messages, stream=True):
+def call_with_retry(api_key, messages, stream=True, max_tokens=4096):
     last = None
     for i in range(RETRIES):
         try:
-            return call_api(api_key, messages, stream=stream)
+            return call_api(api_key, messages, stream=stream, max_tokens=max_tokens)
         except ApiError as e:
             last = str(e)
             if not e.retryable or i == RETRIES - 1:
@@ -204,7 +210,7 @@ def call_with_retry(api_key, messages, stream=True):
             time.sleep(1 + i)
     # 流式失败 → 兜底走非流式一次
     try:
-        return call_api(api_key, messages, stream=False)
+        return call_api(api_key, messages, stream=False, max_tokens=max_tokens)
     except ApiError as e:
         return last or str(e)
 
@@ -350,19 +356,21 @@ def emit(text, out_path, streamed=False):
 def analyze_paths(api_key, images, mode, extra, out_path):
     """把一组图片路径拼成一个请求并分析。返回 (文本, 是否已流式打印)。"""
     stream = STREAM and not out_path
+    mt = MODE_MAX_TOKENS.get(mode, 4096)   # 按模式限制最大输出，短模式更快
+    me = MODE_MAX_EDGE.get(mode, MAX_EDGE)  # S 模式用更小图，首字更快
     if len(images) == 1:
         prompt = PROMPTS.get(mode, PROMPTS["E"]) + (f"\n额外指令：{extra}" if extra else "")
-        b64, desc, mime = encode_image(images[0])
+        b64, desc, mime = encode_image(images[0], max_edge=me)
         print(f"# {desc}  |  模型 {MODEL}")
         msg = {"role": "user", "content": [content_block(b64, mime), {"type": "text", "text": prompt}]}
         t0 = time.time()
-        res = call_with_retry(api_key, [msg], stream=stream)
+        res = call_with_retry(api_key, [msg], stream=stream, max_tokens=mt)
         print(f"[耗时 {time.time() - t0:.2f}s]")
         return res, stream
 
     blocks, descs = [], []
     for p in images:
-        b64, desc, mime = encode_image(p)
+        b64, desc, mime = encode_image(p, max_edge=me)
         blocks.append(content_block(b64, mime))
         descs.append(desc)
     prompt = (f"这是 {len(images)} 张图片。请按顺序逐张分析，每张用「图 1 / 图 2 …」标注，"
@@ -370,7 +378,7 @@ def analyze_paths(api_key, images, mode, extra, out_path):
     print("# " + "  ".join(descs) + f"  |  模型 {MODEL}")
     msg = {"role": "user", "content": blocks + [{"type": "text", "text": prompt}]}
     t0 = time.time()
-    res = call_with_retry(api_key, [msg], stream=stream)
+    res = call_with_retry(api_key, [msg], stream=stream, max_tokens=mt)
     print(f"[耗时 {time.time() - t0:.2f}s]")
     return res, stream
 
