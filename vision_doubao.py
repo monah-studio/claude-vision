@@ -91,7 +91,8 @@ def encode_image(path):
     return b64, desc, mime
 
 def call_api(api_key, messages):
-    payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": 4096}).encode("utf-8")
+    payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": 4096,
+                          "thinking": {"type": "disabled"}}).encode("utf-8")
     req = urllib.request.Request(ENDPOINT, data=payload, headers={
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
