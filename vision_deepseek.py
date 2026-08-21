@@ -355,7 +355,10 @@ def analyze_paths(api_key, images, mode, extra, out_path):
         b64, desc, mime = encode_image(images[0])
         print(f"# {desc}  |  模型 {MODEL}")
         msg = {"role": "user", "content": [content_block(b64, mime), {"type": "text", "text": prompt}]}
-        return call_with_retry(api_key, [msg], stream=stream), stream
+        t0 = time.time()
+        res = call_with_retry(api_key, [msg], stream=stream)
+        print(f"[耗时 {time.time() - t0:.2f}s]")
+        return res, stream
 
     blocks, descs = [], []
     for p in images:
@@ -366,7 +369,10 @@ def analyze_paths(api_key, images, mode, extra, out_path):
               f"并指出它们之间的关联或差异（如有）。") + (f"\n额外指令：{extra}" if extra else "")
     print("# " + "  ".join(descs) + f"  |  模型 {MODEL}")
     msg = {"role": "user", "content": blocks + [{"type": "text", "text": prompt}]}
-    return call_with_retry(api_key, [msg], stream=stream), stream
+    t0 = time.time()
+    res = call_with_retry(api_key, [msg], stream=stream)
+    print(f"[耗时 {time.time() - t0:.2f}s]")
+    return res, stream
 
 
 def main(argv):
@@ -416,7 +422,10 @@ def main(argv):
             content_block(b1, m1), content_block(b2, m2), {"type": "text", "text": prompt}]}
         print(f"# 图1: {d1}\n# 图2: {d2}")
         streamed = STREAM and not out_path
-        emit(call_with_retry(api_key, [msg], stream=streamed), out_path, streamed)
+        t0 = time.time()
+        res = call_with_retry(api_key, [msg], stream=streamed)
+        emit(res, out_path, streamed)
+        print(f"[耗时 {time.time() - t0:.2f}s]")
         return 0
 
     # ---- 普通路径：把 argv 里存在的文件路径收集为图片，其余当作模式/指令 ----
