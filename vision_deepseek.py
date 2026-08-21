@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-vision_doubao.py — 帮 Claude 看图（DeepSeek V4 Flash Vision）
+vision_deepseek.py — 帮 Claude 看图（DeepSeek V4 Flash Vision，唯一模型）
 
 用法：
-  python3 vision_doubao.py <图> A "额外指令"         # UI 页面还原
-  python3 vision_doubao.py <图> B                   # 问题定位
-  python3 vision_doubao.py <图> C                   # 错误日志/堆栈提取
-  python3 vision_doubao.py <图> D                   # OCR 文字提取
-  python3 vision_doubao.py <图> E "额外指令"         # 通用描述
-  python3 vision_doubao.py compare <图1> <图2> "指令"  # 双图对比
+  python3 vision_deepseek.py <图> A "额外指令"         # UI 页面还原
+  python3 vision_deepseek.py <图> B                   # 问题定位
+  python3 vision_deepseek.py <图> C                   # 错误日志/堆栈提取
+  python3 vision_deepseek.py <图> D                   # OCR 文字提取
+  python3 vision_deepseek.py <图> E "额外指令"         # 通用描述
+  python3 vision_deepseek.py compare <图1> <图2> "指令"  # 双图对比
 
 模型：deepseek-v4-flash-vision-exp（实验版，图片转 token 计费，一张图最多 384 tokens）
 Key 获取优先级：DEEPSEEK_API_KEY 环境变量 > 内置默认 key > 1Password op CLI > 报错。
