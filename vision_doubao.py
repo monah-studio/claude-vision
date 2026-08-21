@@ -21,7 +21,9 @@ MODEL = "deepseek-v4-flash-vision-exp"
 ENDPOINT = "https://api.deepseek.com/chat/completions"
 # 内置默认 key（本地版用；GitHub 版留空）。优先级低于环境变量 DEEPSEEK_API_KEY。
 DEFAULT_API_KEY = ""
-MAX_EDGE = 2048
+MAX_EDGE = 1280   # 压缩到长边 1280，避免大图撑爆上下文
+WEBP_QUALITY = 72  # WebP 主压缩（比 JPEG 小约 10 倍）
+JPEG_QUALITY = 82  # WebP 不可用时回退 JPEG
 TIMEOUT = 150
 
 PROMPTS = {
@@ -76,12 +78,14 @@ def encode_image(path):
             im = im.resize(new, Image.LANCZOS)
             desc += f" → 已缩放到 {new[0]}x{new[1]}"
         buf = io.BytesIO()
-        if im.format == "PNG":
-            im.save(buf, format="PNG")
-            mime = "image/png"
-        else:
-            im = im.convert("RGB")
-            im.save(buf, format="JPEG", quality=88)
+        # 统一转 WebP 压缩（比 JPEG 小约 10 倍），WebP 不可用则退 JPEG
+        im = im.convert("RGB")
+        try:
+            im.save(buf, format="WEBP", quality=WEBP_QUALITY)
+            mime = "image/webp"
+        except Exception:
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
             mime = "image/jpeg"
         b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     return b64, desc, mime
