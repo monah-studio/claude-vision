@@ -22,6 +22,7 @@ ENDPOINT = "https://api.deepseek.com/chat/completions"
 # 内置默认 key（本地版用；GitHub 版留空）。优先级低于环境变量 DEEPSEEK_API_KEY。
 DEFAULT_API_KEY = ""
 MAX_EDGE = 1280   # 压缩到长边 1280，避免大图撑爆上下文
+MAX_RAW_BYTES = 512 * 1024  # 小图（≤512KB）直接传原字节，跳过解码/重编码
 WEBP_QUALITY = 72  # WebP 主压缩（比 JPEG 小约 10 倍）
 JPEG_QUALITY = 82  # WebP 不可用时回退 JPEG
 TIMEOUT = 150
@@ -69,26 +70,34 @@ def encode_image(path):
         from PIL import Image
     except ImportError:
         sys.exit("缺少 Pillow: 请运行  pip install --break-system-packages pillow")
+    MIME = {"WEBP": "image/webp", "JPEG": "image/jpeg", "PNG": "image/png", "GIF": "image/gif"}
+    with open(path, "rb") as f:
+        raw = f.read()
+    with Image.open(path) as im:  # 只读头部，不完整解码
+        w, h = im.size
+        fmt = im.format or ""
+    desc = f"{path} ({fmt} {w}x{h})"
+    # 快速路径：已是小图（≤1280 且 ≤512KB），直接传原字节，跳过解码/缩放/重编码
+    if fmt in MIME and max(w, h) <= MAX_EDGE and len(raw) <= MAX_RAW_BYTES:
+        return base64.b64encode(raw).decode("ascii"), desc, MIME[fmt]
+    # 慢路径：大图缩放（BILINEAR 比 LANCZOS 快约 4 倍）+ 压缩（WebP method 0 最快）
     with Image.open(path) as im:
         im.load()
-        desc = f"{path} ({im.format} {im.size[0]}x{im.size[1]}, {im.mode})"
         if max(im.size) > MAX_EDGE:
             scale = MAX_EDGE / max(im.size)
-            new = (int(im.size[0]*scale), int(im.size[1]*scale))
-            im = im.resize(new, Image.LANCZOS)
+            new = (int(im.size[0] * scale), int(im.size[1] * scale))
+            im = im.resize(new, Image.BILINEAR)
             desc += f" → 已缩放到 {new[0]}x{new[1]}"
-        buf = io.BytesIO()
-        # 统一转 WebP 压缩（比 JPEG 小约 10 倍），WebP 不可用则退 JPEG
         im = im.convert("RGB")
+        buf = io.BytesIO()
         try:
-            im.save(buf, format="WEBP", quality=WEBP_QUALITY)
+            im.save(buf, format="WEBP", quality=WEBP_QUALITY, method=0)
             mime = "image/webp"
         except Exception:
             buf = io.BytesIO()
             im.save(buf, format="JPEG", quality=JPEG_QUALITY, optimize=True)
             mime = "image/jpeg"
-        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
-    return b64, desc, mime
+    return base64.b64encode(buf.getvalue()).decode("ascii"), desc, mime
 
 def call_api(api_key, messages):
     payload = json.dumps({"model": MODEL, "messages": messages, "max_tokens": 4096,
